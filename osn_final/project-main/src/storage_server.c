@@ -1,22 +1,183 @@
 #include "../include/common.h"
 #include "../include/sentence_parser.h"
+#include "../include/file_locking.h"
 #include <signal.h>
 #include <fcntl.h>
+#include <glib.h>
 
 #define SS_CLIENT_PORT 7000
 #define SS_ID "SS1"
 
 int client_server_socket = -1;
 int running = 1;
-pthread_mutex_t file_mutex;
+
+// Connection pool for clients
+typedef struct {
+    int fd;
+    time_t last_used;
+    bool in_use;
+    pthread_mutex_t mutex;
+} connection_t;
+
+static connection_t* connection_pool = NULL;
+static int connection_pool_size = 0;
+static pthread_mutex_t connection_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Cleanup function for connection pool
+static void cleanup_connection_pool() {
+    if (connection_pool) {
+        for (int i = 0; i < connection_pool_size; i++) {
+            if (connection_pool[i].fd >= 0) {
+                close(connection_pool[i].fd);
+                pthread_mutex_destroy(&connection_pool[i].mutex);
+            }
+        }
+        g_free(connection_pool);
+        connection_pool = NULL;
+        connection_pool_size = 0;
+    }
+}
 
 void cleanup_ss() {
     running = 0;
+    
+    // Close client server socket
     if (client_server_socket >= 0) {
         close(client_server_socket);
+        client_server_socket = -1;
     }
-    pthread_mutex_destroy(&file_mutex);
+    
+    // Clean up connection pool
+    cleanup_connection_pool();
+    
+    // Clean up file locking system
+    file_locking_cleanup();
+    
+    // Clean up any other resources
+    pthread_mutex_destroy(&connection_pool_mutex);
+    
     log_message("STORAGE_SERVER", "INFO", "Storage Server shutdown complete");
+}
+
+// Initialize the connection pool with a given size
+static int init_connection_pool(int size) {
+    if (size <= 0) {
+        log_message("CONN_POOL", "ERROR", "Invalid connection pool size: %d", size);
+        return -1;
+    }
+    
+    pthread_mutex_lock(&connection_pool_mutex);
+    
+    // Clean up existing pool if any
+    cleanup_connection_pool();
+    
+    // Allocate new pool
+    connection_pool = g_malloc0_n(size, sizeof(connection_t));
+    if (!connection_pool) {
+        log_message("CONN_POOL", "ERROR", "Failed to allocate connection pool");
+        pthread_mutex_unlock(&connection_pool_mutex);
+        return -1;
+    }
+    
+    connection_pool_size = size;
+    
+    // Initialize pool entries
+    for (int i = 0; i < size; i++) {
+        connection_pool[i].fd = -1;
+        connection_pool[i].in_use = false;
+        connection_pool[i].last_used = 0;
+        if (pthread_mutex_init(&connection_pool[i].mutex, NULL) != 0) {
+            log_message("CONN_POOL", "ERROR", "Failed to initialize mutex for connection %d", i);
+            // Clean up any initialized mutexes
+            while (--i >= 0) {
+                pthread_mutex_destroy(&connection_pool[i].mutex);
+            }
+            g_free(connection_pool);
+            connection_pool = NULL;
+            connection_pool_size = 0;
+            pthread_mutex_unlock(&connection_pool_mutex);
+            return -1;
+        }
+    }
+    
+    log_message("CONN_POOL", "INFO", "Initialized connection pool with %d connections", size);
+    pthread_mutex_unlock(&connection_pool_mutex);
+    return 0;
+}
+
+// Get an available connection from the pool
+static connection_t* get_connection() {
+    connection_t* conn = NULL;
+    
+    pthread_mutex_lock(&connection_pool_mutex);
+    
+    // Try to find an available connection
+    for (int i = 0; i < connection_pool_size; i++) {
+        if (!connection_pool[i].in_use) {
+            conn = &connection_pool[i];
+            conn->in_use = true;
+            conn->last_used = time(NULL);
+            pthread_mutex_lock(&conn->mutex);
+            break;
+        }
+    }
+    
+    pthread_mutex_unlock(&connection_pool_mutex);
+    
+    if (!conn) {
+        log_message("CONN_POOL", "WARNING", "No available connections in pool");
+    }
+    
+    return conn;
+}
+
+// Release a connection back to the pool
+static void release_connection(connection_t* conn) {
+    if (!conn) return;
+    
+    // Reset connection state
+    conn->last_used = time(NULL);
+    conn->in_use = false;
+    
+    // Unlock the connection's mutex
+    pthread_mutex_unlock(&conn->mutex);
+}
+
+// Clean up idle connections that haven't been used for more than timeout_sec seconds
+static void cleanup_idle_connections(int timeout_sec) {
+    if (timeout_sec <= 0) return;
+    
+    time_t now = time(NULL);
+    int cleaned = 0;
+    
+    pthread_mutex_lock(&connection_pool_mutex);
+    
+    for (int i = 0; i < connection_pool_size; i++) {
+        if (connection_pool[i].in_use && 
+            (now - connection_pool[i].last_used) > timeout_sec) {
+            
+            pthread_mutex_lock(&connection_pool[i].mutex);
+            
+            // Close the socket if it's still open
+            if (connection_pool[i].fd >= 0) {
+                close(connection_pool[i].fd);
+                connection_pool[i].fd = -1;
+            }
+            
+            connection_pool[i].in_use = false;
+            connection_pool[i].last_used = 0;
+            
+            pthread_mutex_unlock(&connection_pool[i].mutex);
+            
+            cleaned++;
+        }
+    }
+    
+    if (cleaned > 0) {
+        log_message("CONN_POOL", "DEBUG", "Cleaned up %d idle connections", cleaned);
+    }
+    
+    pthread_mutex_unlock(&connection_pool_mutex);
 }
 
 void signal_handler_ss(int signum) {
@@ -25,113 +186,447 @@ void signal_handler_ss(int signum) {
     exit(0);
 }
 
-void register_with_nm() {
-    int nm_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (nm_socket < 0) {
-        log_message("STORAGE_SERVER", "ERROR", "Failed to create socket for NM");
-        return;
+// Set socket options for keepalive
+static int set_keepalive(int sockfd, int keepalive, int keepidle, int keepintvl, int keepcnt) {
+    int optval = keepalive;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_KEEPALIVE, &optval, sizeof(optval)) < 0) {
+        return -1;
     }
     
-    struct sockaddr_in nm_addr;
-    memset(&nm_addr, 0, sizeof(nm_addr));
-    nm_addr.sin_family = AF_INET;
-    nm_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-    nm_addr.sin_port = htons(NM_PORT);
+    if (keepalive) {
+        // TCP_KEEPIDLE: time (in seconds) the connection needs to remain idle before TCP starts sending keepalive probes
+        if (setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle)) < 0) {
+            return -1;
+        }
+        
+        // TCP_KEEPINTVL: time (in seconds) between individual keepalive probes
+        if (setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl)) < 0) {
+            return -1;
+        }
+        
+        // TCP_KEEPCNT: maximum number of keepalive probes TCP should send before dropping the connection
+        if (setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt)) < 0) {
+            return -1;
+        }
+    }
     
-    if (connect(nm_socket, (struct sockaddr*)&nm_addr, sizeof(nm_addr)) < 0) {
-        log_message("STORAGE_SERVER", "ERROR", "Failed to connect to NM: %s", strerror(errno));
+    return 0;
+}
+
+// Thread function to handle NM registration and heartbeats
+static void* nm_heartbeat_thread(void* arg) {
+    (void)arg; // Unused parameter
+    
+    while (running) {
+        int nm_socket = socket(AF_INET, SOCK_STREAM, 0);
+        if (nm_socket < 0) {
+            log_message("NM_HEARTBEAT", "ERROR", "Failed to create socket for NM: %s", strerror(errno));
+            sleep(5); // Wait before retrying
+            continue;
+        }
+        
+        // Set socket options
+        int optval = 1;
+        setsockopt(nm_socket, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+        
+        // Set keepalive options
+        if (set_keepalive(nm_socket, 1, 30, 10, 3) < 0) {
+            log_message("NM_HEARTBEAT", "WARNING", "Failed to set keepalive options: %s", strerror(errno));
+        }
+        
+        struct sockaddr_in nm_addr;
+        memset(&nm_addr, 0, sizeof(nm_addr));
+        nm_addr.sin_family = AF_INET;
+        nm_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+        nm_addr.sin_port = htons(NM_PORT);
+        
+        // Set connection timeout
+        struct timeval timeout;
+        timeout.tv_sec = 5;  // 5 second timeout
+        timeout.tv_usec = 0;
+        setsockopt(nm_socket, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout));
+        setsockopt(nm_socket, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
+        
+        // Connect to NM
+        if (connect(nm_socket, (struct sockaddr*)&nm_addr, sizeof(nm_addr)) < 0) {
+            log_message("NM_HEARTBEAT", "ERROR", "Failed to connect to NM: %s", strerror(errno));
+            close(nm_socket);
+            sleep(5); // Wait before retrying
+            continue;
+        }
+        
+        log_message("NM_HEARTBEAT", "INFO", "Connected to Naming Server");
+        
+        // Send registration message
+        Message msg;
+        memset(&msg, 0, sizeof(Message));
+        msg.msg_type = MSG_REGISTER_SS;
+        snprintf(msg.data, BUFFER_SIZE, "%s|127.0.0.1|%d|%d", SS_ID, 6000, SS_CLIENT_PORT);
+        
+        if (send(nm_socket, &msg, sizeof(Message), 0) < 0) {
+            log_message("NM_HEARTBEAT", "ERROR", "Failed to send registration to NM: %s", strerror(errno));
+            close(nm_socket);
+            sleep(5); // Wait before retrying
+            continue;
+        }
+        
+        log_message("NM_HEARTBEAT", "INFO", "Successfully registered with Naming Server");
+        
+        // Heartbeat loop
+        while (running) {
+            // Send heartbeat every 30 seconds
+            sleep(30);
+            
+            Message hb_msg;
+            memset(&hb_msg, 0, sizeof(Message));
+            hb_msg.msg_type = MSG_HEARTBEAT;
+            snprintf(hb_msg.data, BUFFER_SIZE, "%s|ALIVE|%d", SS_ID, getpid());
+            
+            if (send(nm_socket, &hb_msg, sizeof(Message), 0) < 0) {
+                log_message("NM_HEARTBEAT", "ERROR", "Failed to send heartbeat to NM: %s", strerror(errno));
+                break; // Exit heartbeat loop to reconnect
+            }
+            
+            // Wait for acknowledgment (with timeout handled by SO_RCVTIMEO)
+            Message ack_msg;
+            ssize_t bytes_received = recv(nm_socket, &ack_msg, sizeof(Message), 0);
+            
+            if (bytes_received <= 0) {
+                if (bytes_received == 0) {
+                    log_message("NM_HEARTBEAT", "WARNING", "Naming Server closed the connection");
+                } else {
+                    log_message("NM_HEARTBEAT", "ERROR", "Error receiving heartbeat ack: %s", strerror(errno));
+                }
+                break; // Exit heartbeat loop to reconnect
+            }
+            
+            if (ack_msg.msg_type == MSG_ACK) {
+                log_message("NM_HEARTBEAT", "DEBUG", "Received heartbeat ack from Naming Server");
+            }
+        }
+        
+        // Clean up
         close(nm_socket);
+    }
+    
+    return NULL;
+}
+
+void register_with_nm() {
+    // Initialize the connection pool
+    if (init_connection_pool(MAX_CLIENTS) < 0) {
+        log_message("STORAGE_SERVER", "ERROR", "Failed to initialize connection pool");
         return;
     }
     
-    Message msg;
-    memset(&msg, 0, sizeof(Message));
-    msg.msg_type = MSG_REGISTER_SS;
-    snprintf(msg.data, BUFFER_SIZE, "%s|127.0.0.1|%d|%d", SS_ID, 6000, SS_CLIENT_PORT);
+    // Initialize file locking system
+    file_locking_init();
     
-    send_message(nm_socket, &msg);
-    
-    Message response;
-    if (receive_message(nm_socket, &response) >= 0) {
-        log_message("STORAGE_SERVER", "INFO", "Registered with NM: %s", response.data);
+    // Create heartbeat thread
+    pthread_t heartbeat_tid;
+    if (pthread_create(&heartbeat_tid, NULL, nm_heartbeat_thread, NULL) != 0) {
+        log_message("STORAGE_SERVER", "ERROR", "Failed to create heartbeat thread: %s", strerror(errno));
+        return;
     }
     
-    close(nm_socket);
+    // Detach the thread so we don't need to join it
+    pthread_detach(heartbeat_tid);
+    
+    log_message("STORAGE_SERVER", "INFO", "Started Naming Server registration and heartbeat thread");
+}
+
+// Validate filename to prevent directory traversal and other security issues
+static int validate_filename(const char* filename) {
+    if (!filename || *filename == '\0' || strstr(filename, "..") || strchr(filename, '/')) {
+        return -1;
+    }
+    
+    // Check for invalid characters
+    const char* invalid_chars = "<>:\"|?*\\";
+    if (strpbrk(filename, invalid_chars) != NULL) {
+        return -1;
+    }
+    
+    // Check maximum length
+    size_t len = strlen(filename);
+    if (len >= MAX_FILENAME || len == 0) {
+        return -1;
+    }
+    
+    return 0;
+}
+
+// Ensure the data directory exists
+static int ensure_data_directory() {
+    static int dir_checked = 0;
+    if (dir_checked) return 0;
+    
+    struct stat st = {0};
+    if (stat("data", &st) == -1) {
+        if (mkdir("data", 0755) == -1 && errno != EEXIST) {
+            log_message("FILE_OPS", "ERROR", "Failed to create data directory: %s", strerror(errno));
+            return -1;
+        }
+    }
+    
+    if (stat("data/files", &st) == -1) {
+        if (mkdir("data/files", 0755) == -1 && errno != EEXIST) {
+            log_message("FILE_OPS", "ERROR", "Failed to create data/files directory: %s", strerror(errno));
+            return -1;
+        }
+    }
+    
+    dir_checked = 1;
+    return 0;
 }
 
 int load_file_content(const char* filename, char* content, int max_len) {
-    char filepath[MAX_PATH];
-    snprintf(filepath, MAX_PATH, "data/files/%s", filename);
-    
-    FILE* fp = fopen(filepath, "r");
-    if (!fp) {
+    // Validate input parameters
+    if (!filename || !content || max_len <= 0) {
+        log_message("FILE_OPS", "ERROR", "Invalid parameters to load_file_content");
         return -1;
     }
     
-    int bytes_read = fread(content, 1, max_len - 1, fp);
-    content[bytes_read] = '\0';
+    // Validate filename
+    if (validate_filename(filename) != 0) {
+        log_message("FILE_OPS", "ERROR", "Invalid filename: %s", filename);
+        return -1;
+    }
+    
+    // Ensure data directory exists
+    if (ensure_data_directory() != 0) {
+        return -1;
+    }
+    
+    char filepath[MAX_PATH];
+    snprintf(filepath, MAX_PATH, "data/files/%s", filename);
+    
+    // Acquire read lock
+    if (file_read_lock(filepath) != 0) {
+        log_message("FILE_OPS", "ERROR", "Failed to acquire read lock for %s", filename);
+        return -1;
+    }
+    
+    FILE* fp = NULL;
+    int result = -1;
+    
+    do {
+        fp = fopen(filepath, "r");
+        if (!fp) {
+            log_message("FILE_OPS", "ERROR", "Failed to open file %s: %s", filepath, strerror(errno));
+            break;
+        }
+        
+        // Get file size
+        if (fseek(fp, 0, SEEK_END) != 0) {
+            log_message("FILE_OPS", "ERROR", "Failed to seek to end of file %s", filepath);
+            break;
+        }
+        
+        long file_size = ftell(fp);
+        if (file_size < 0) {
+            log_message("FILE_OPS", "ERROR", "Failed to get file size for %s", filepath);
+            break;
+        }
+        
+        // Check if file is too large for our buffer
+        if (file_size >= max_len - 1) {
+            log_message("FILE_OPS", "ERROR", "File %s is too large (%ld bytes, max %d)", 
+                       filepath, file_size, max_len - 1);
+            break;
+        }
+        
+        // Read file content
+        rewind(fp);
+        size_t bytes_read = fread(content, 1, file_size, fp);
+        if (ferror(fp)) {
+            log_message("FILE_OPS", "ERROR", "Error reading file %s", filepath);
+            break;
+        }
+        
+        content[bytes_read] = '\0';
+        result = (int)bytes_read;
+        
+    } while (0);
+    
+    // Clean up
+    if (fp) {
+        fclose(fp);
+    }
+    
+    // Release the lock
+    file_unlock(filepath);
+    
+    if (result >= 0) {
+        log_message("FILE_OPS", "DEBUG", "Successfully read %d bytes from %s", result, filename);
+    }
+    
+    return result;
+}
+
+// Save content to a temporary file and then atomically rename it
+static int atomic_write_file(const char* filepath, const char* content, size_t content_len) {
+    char tmp_path[MAX_PATH + 16];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.XXXXXX.tmp", filepath);
+    
+    // Create a temporary file with a unique name
+    int fd = mkstemps(tmp_path, 4); // 4 is the length of ".tmp"
+    if (fd < 0) {
+        log_message("FILE_OPS", "ERROR", "Failed to create temporary file for %s: %s", 
+                   filepath, strerror(errno));
+        return -1;
+    }
+    
+    FILE* fp = fdopen(fd, "w");
+    if (!fp) {
+        log_message("FILE_OPS", "ERROR", "Failed to open temporary file %s: %s", 
+                   tmp_path, strerror(errno));
+        close(fd);
+        unlink(tmp_path); // Clean up
+        return -1;
+    }
+    
+    // Write content to temporary file
+    size_t written = fwrite(content, 1, content_len, fp);
+    if (ferror(fp) || written != content_len) {
+        log_message("FILE_OPS", "ERROR", "Failed to write to temporary file %s: %s", 
+                   tmp_path, strerror(errno));
+        fclose(fp);
+        unlink(tmp_path);
+        return -1;
+    }
+    
+    // Ensure all data is written to disk
+    if (fflush(fp) != 0 || fsync(fileno(fp)) != 0) {
+        log_message("FILE_OPS", "ERROR", "Failed to sync temporary file %s: %s", 
+                   tmp_path, strerror(errno));
+        fclose(fp);
+        unlink(tmp_path);
+        return -1;
+    }
+    
     fclose(fp);
     
-    return bytes_read;
+    // Atomically rename the temporary file to the target file
+    if (rename(tmp_path, filepath) != 0) {
+        log_message("FILE_OPS", "ERROR", "Failed to rename %s to %s: %s", 
+                   tmp_path, filepath, strerror(errno));
+        unlink(tmp_path);
+        return -1;
+    }
+    
+    // Ensure the directory is synced to disk (important for durability)
+    char dirpath[MAX_PATH];
+    strncpy(dirpath, filepath, MAX_PATH);
+    char* last_slash = strrchr(dirpath, '/');
+    if (last_slash) {
+        *last_slash = '\0';
+        int dir_fd = open(dirpath, O_RDONLY);
+        if (dir_fd >= 0) {
+            fsync(dir_fd);
+            close(dir_fd);
+        }
+    }
+    
+    return 0;
 }
 
 int save_file_content(const char* filename, const char* content) {
-    char filepath[MAX_PATH];
-    snprintf(filepath, MAX_PATH, "data/files/%s", filename);
-    
-    FILE* fp = fopen(filepath, "w");
-    if (!fp) {
-        log_message("STORAGE_SERVER", "ERROR", "Failed to create file %s", filepath);
+    // Validate input parameters
+    if (!filename || !content) {
+        log_message("FILE_OPS", "ERROR", "Invalid parameters to save_file_content");
         return -1;
     }
     
-    fputs(content, fp);
-    fclose(fp);
+    // Validate filename
+    if (validate_filename(filename) != 0) {
+        log_message("FILE_OPS", "ERROR", "Invalid filename: %s", filename);
+        return -1;
+    }
     
-    log_message("STORAGE_SERVER", "INFO", "File saved: %s (%lu bytes)", filename, strlen(content));
-    return 0;
+    // Ensure data directory exists
+    if (ensure_data_directory() != 0) {
+        return -1;
+    }
+    
+    char filepath[MAX_PATH];
+    snprintf(filepath, MAX_PATH, "data/files/%s", filename);
+    
+    // Acquire write lock
+    if (file_write_lock(filepath) != 0) {
+        log_message("FILE_OPS", "ERROR", "Failed to acquire write lock for %s", filename);
+        return -1;
+    }
+    
+    int result = -1;
+    size_t content_len = strlen(content);
+    
+    // Use atomic write to prevent partial writes
+    if (atomic_write_file(filepath, content, content_len) == 0) {
+        log_message("FILE_OPS", "INFO", "Successfully saved %zu bytes to %s", 
+                   content_len, filename);
+        result = 0;
+    } else {
+        log_message("FILE_OPS", "ERROR", "Failed to save content to %s", filename);
+    }
+    
+    // Release the lock
+    file_unlock(filepath);
+    
+    return result;
 }
 
 // Load entire file content into dynamically allocated string
 char* load_file(const char* filename) {
+    // Validate input parameters
+    if (!filename) {
+        log_message("FILE_OPS", "ERROR", "NULL filename in load_file");
+        return NULL;
+    }
+    
+    // First get the file size
     char filepath[MAX_PATH];
     snprintf(filepath, MAX_PATH, "data/files/%s", filename);
     
-    FILE* fp = fopen(filepath, "r");
-    if (!fp) {
+    // Use stat to get file size without opening the file
+    struct stat st;
+    if (stat(filepath, &st) != 0) {
+        log_message("FILE_OPS", "ERROR", "Failed to stat file %s: %s", 
+                   filename, strerror(errno));
         return NULL;
     }
     
-    fseek(fp, 0, SEEK_END);
-    long size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    
-    char* content = (char*)malloc(size + 1);
+    // Allocate buffer with extra byte for null terminator
+    char* content = (char*)malloc(st.st_size + 1);
     if (!content) {
-        fclose(fp);
+        log_message("FILE_OPS", "ERROR", "Failed to allocate %ld bytes for file %s", 
+                   (long)st.st_size + 1, filename);
         return NULL;
     }
     
-    size_t bytes = fread(content, 1, size, fp);
-    content[bytes] = '\0';
-    fclose(fp);
+    // Use load_file_content to read the file with proper locking
+    int bytes_read = load_file_content(filename, content, st.st_size + 1);
+    if (bytes_read < 0) {
+        log_message("FILE_OPS", "ERROR", "Failed to read file %s", filename);
+        free(content);
+        return NULL;
+    }
+    
+    // Ensure null termination
+    content[bytes_read] = '\0';
     
     return content;
 }
 
-// Save content to file
+// Save content to file with proper error handling
 int save_file(const char* filename, const char* content) {
-    char filepath[MAX_PATH];
-    snprintf(filepath, MAX_PATH, "data/files/%s", filename);
-    
-    FILE* fp = fopen(filepath, "w");
-    if (!fp) {
+    if (!filename || !content) {
+        log_message("FILE_OPS", "ERROR", "Invalid parameters to save_file");
         return -1;
     }
     
-    fputs(content, fp);
-    fclose(fp);
-    return 0;
+    // Use save_file_content which handles all the error checking and atomic writes
+    return save_file_content(filename, content);
 }
 
 int load_metadata(const char* filename, FileInfo* info, ACLEntry acl[], int* acl_count) {
