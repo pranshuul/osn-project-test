@@ -1,0 +1,46 @@
+[2025-11-04 14:52:17] [INFO] Name Server initialized
+[2025-11-04 14:52:17] [INFO] No existing file registry found
+[2025-11-04 14:52:17] [INFO] Name Server listening on port 5000
+[2025-11-04 14:52:24] [INFO] New client connected from 127.0.0.1:42404
+[2025-11-04 14:52:24] [INFO] Storage Server registered: SS1 at 127.0.0.1:7000
+[2025-11-04 14:52:34] [INFO] New client connected from 127.0.0.1:58084
+[2025-11-04 14:52:34] [INFO] User registered: arya from 127.0.0.1:0
+[2025-11-04 14:52:48] [INFO] File registry saved (1 files)
+[2025-11-04 14:52:48] [INFO] File created: test.txt (owner: arya, SS: SS1)
+[2025-11-04 14:53:19] [INFO] READ: arya redirecting test.txt to SS SS1
+[2025-11-04 14:53:25] [INFO] READ: arya redirecting test.txt to SS SS1
+[2025-11-04 14:58:31] [INFO] Received signal 2, shutting down...
+[2025-11-04 15:50:57] [INFO] Name Server initialized
+[2025-11-04 15:50:57] [INFO] Loaded file: test.txt (owner: arya, SS: SS1)
+[2025-11-04 15:50:58] [INFO] Name Server listening on port 5000
+[2025-11-04 15:51:15] [INFO] New client connected from 127.0.0.1:53596
+[2025-11-04 15:51:15] [INFO] Storage Server registered: SS1 at 127.0.0.1:7000 (replica: none)
+[2025-11-04 15:51:37] [INFO] New client connected from 127.0.0.1:36372
+[2025-11-04 15:51:37] [INFO] User registered: arya from 127.0.0.1:0
+[2025-11-04 15:51:47] [WARNING] Storage Server SS1 marked as down
+[2025-11-04 15:52:38] [INFO] VIEW command: 1 files listed for arya
+[2025-11-04 15:52:48] [INFO] VIEW command: 1 files listed for arya
+[2025-11-04 15:53:03] [INFO] VIEW command: 1 files listed for arya
+[2025-11-04 15:53:36] [INFO] New client connected from 127.0.0.1:48704
+[2025-11-04 15:53:36] [INFO] User registered: bhakti from 127.0.0.1:0
+[2025-11-04 15:53:45] [INFO] VIEW command: 1 files listed for bhakti
+[2025-11-04 15:53:48] [INFO] VIEW command: 1 files listed for bhakti
+[2025-11-04 15:53:52] [INFO] VIEW command: 1 files listed for bhakti
+[2025-11-04 15:54:50] [INFO] New client connected from 127.0.0.1:48974
+[2025-11-04 15:54:50] [INFO] Storage Server registered: SS1 at 127.0.0.1:7000 (replica: SS1)
+[2025-11-04 15:54:57] [INFO] READ: arya redirecting test.txt to SS SS1
+[2025-11-04 15:55:04] [INFO] READ: bhakti redirecting test.txt to SS SS1
+[2025-11-04 15:55:17] [INFO] New client connected from 127.0.0.1:48342
+[2025-11-04 15:55:17] [INFO] User registered: bhakti from 127.0.0.1:0
+[2025-11-04 15:55:20] [INFO] READ: bhakti redirecting test.txt to SS SS1
+[2025-11-04 15:55:28] [WARNING] Storage Server SS1 marked as down
+[2025-11-04 15:55:28] [INFO] Failing over to replica: SS1
+[2025-11-04 15:55:35] [INFO] File registry saved (2 files)
+[2025-11-04 15:55:35] [INFO] File created: test2.txt (owner: bhakti, SS: SS1, load: 1 files)
+[2025-11-04 15:55:49] [INFO] Lock acquired: test2.txt:0 by bhakti
+[2025-11-04 15:58:08] [INFO] Name Server initialized
+[2025-11-04 15:58:08] [INFO] Loaded file: test.txt (owner: arya, SS: SS1)
+[2025-11-04 15:58:08] [INFO] Loaded file: test2.txt (owner: bhakti, SS: SS1)
+[2025-11-04 15:58:08] [INFO] Name Server listening on port 5000
+[2025-11-04 15:58:09] [INFO] Received signal 2, shutting down...
+[2025-11-04 15:58:09] [INFO] Server shutdown complete

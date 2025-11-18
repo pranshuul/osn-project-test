@@ -1,0 +1,29 @@
+[2025-11-04 14:52:24] [INFO] Storage Server SS1 starting
+[2025-11-04 14:52:24] [INFO] Registered with NM: SS SS1 registered successfully
+[2025-11-04 14:52:24] [INFO] Storage Server listening on port 7000
+[2025-11-04 14:52:48] [INFO] Client connected from 127.0.0.1:40942
+[2025-11-04 14:52:48] [INFO] File created: test.txt by arya
+[2025-11-04 14:53:19] [INFO] Client connected from 127.0.0.1:53426
+[2025-11-04 14:53:19] [INFO] File saved: test.txt (11 bytes)
+[2025-11-04 14:53:19] [INFO] File written: test.txt by arya (sentence 0)
+[2025-11-04 14:53:25] [INFO] Client connected from 127.0.0.1:53434
+[2025-11-04 14:53:25] [INFO] File read: test.txt by arya
+[2025-11-04 14:58:29] [INFO] Received signal 2, shutting down...
+[2025-11-04 14:58:29] [INFO] Storage Server shutdown complete
+[2025-11-04 15:51:15] [INFO] Storage Server SS1 starting
+[2025-11-04 15:51:15] [INFO] Registered with NM: SS SS1 registered successfully
+[2025-11-04 15:51:15] [INFO] Storage Server listening on port 7000
+[2025-11-04 15:54:27] [INFO] Received signal 2, shutting down...
+[2025-11-04 15:54:27] [INFO] Storage Server shutdown complete
+[2025-11-04 15:54:50] [INFO] Storage Server SS1 starting
+[2025-11-04 15:54:50] [INFO] Registered with NM: SS SS1 registered successfully
+[2025-11-04 15:54:50] [INFO] Storage Server listening on port 7000
+[2025-11-04 15:54:57] [INFO] Client connected from 127.0.0.1:52244
+[2025-11-04 15:54:57] [INFO] File read: test.txt by arya
+[2025-11-04 15:55:04] [INFO] Client connected from 127.0.0.1:60050
+[2025-11-04 15:55:20] [INFO] Client connected from 127.0.0.1:40180
+[2025-11-04 15:55:35] [INFO] Client connected from 127.0.0.1:43730
+[2025-11-04 15:55:35] [INFO] File created: test2.txt by bhakti
+[2025-11-04 15:56:18] [INFO] Client connected from 127.0.0.1:36114
+[2025-11-04 15:57:42] [INFO] Received signal 2, shutting down...
+[2025-11-04 15:57:42] [INFO] Storage Server shutdown complete
